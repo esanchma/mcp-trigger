@@ -1,0 +1,20 @@
+{
+  "name": "mcp-trigger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./src/index.ts --compile --outfile ./dist/mcp-trigger",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "dev": "bun run ./src/index.ts",
+    "install-local": "./scripts/install.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  }
+}
