@@ -7,6 +7,19 @@ function wordcraftConfigDirectory(): string {
   return join(home, ".var", "app", "ai.storyteller.wordcraft", "config", "wordcraft");
 }
 
+export function runtimeDirectory(): string | undefined {
+  if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
+  if (process.platform === "linux" && typeof process.getuid === "function") return `/run/user/${process.getuid()}`;
+  return undefined;
+}
+
+export async function readGridcraftControlToken(port: number): Promise<string | undefined> {
+  if (process.env.GRIDCRAFT_CONTROL_TOKEN) return process.env.GRIDCRAFT_CONTROL_TOKEN;
+  const runtime = runtimeDirectory();
+  if (!runtime) return undefined;
+  return readControlToken(join(runtime, ".flatpak", "ai.storyteller.gridcraft", "xdg-run", "gridcraft", `control-${port}.token`));
+}
+
 export async function readControlToken(file: string): Promise<string | undefined> {
   try {
     const token = (await readFile(file, "utf8")).trim();

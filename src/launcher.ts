@@ -1,12 +1,19 @@
 import { join } from "node:path";
 import type { AppConfig } from "./config";
-import { inspectControl } from "./control";
-import { readControlToken } from "./credentials";
+import { inspectControl, inspectGridcraftControl, isTcpPortOpen } from "./control";
+import { readControlToken, readGridcraftControlToken, runtimeDirectory } from "./credentials";
 
 export type AppStatus = "stopped" | "starting" | "ready" | "occupied";
 
 export async function appStatus(config: AppConfig): Promise<AppStatus> {
-  const status = await inspectControl(config.controlPort, 1_000, await controlToken(config));
+  let status;
+  if (config.controlHealth === "tcp") {
+    status = await isTcpPortOpen(config.controlPort);
+  } else if (config.id === "gridcraft") {
+    status = await inspectGridcraftControl(config.controlPort, () => readGridcraftControlToken(config.controlPort));
+  } else {
+    status = await inspectControl(config.controlPort, 1_000, await controlToken(config));
+  }
   if (status === "ready") return "ready";
   return status === "stopped" ? "stopped" : "occupied";
 }
@@ -24,7 +31,9 @@ export async function startAndWait(config: AppConfig): Promise<void> {
     );
   }
 
+  const runtime = config.id === "gridcraft" ? runtimeDirectory() : undefined;
   const child = Bun.spawn(["setsid", config.launch.command, ...launchArgs(config)], {
+    ...(runtime ? { env: { ...process.env, XDG_RUNTIME_DIR: runtime } } : {}),
     detached: true,
     stdin: "ignore",
     stdout: "ignore",

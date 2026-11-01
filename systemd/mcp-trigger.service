@@ -1,0 +1,14 @@
+[Unit]
+Description=ArtCraft MCP HTTP proxy
+After=graphical-session-pre.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mcp-trigger serve
+Restart=on-failure
+RestartSec=3
+# Applications launched by the proxy must remain open when the service stops.
+KillMode=process
+
+[Install]
+WantedBy=default.target

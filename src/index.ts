@@ -1,16 +1,9 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  type CallToolResult,
-  ListToolsRequestSchema,
-  McpError,
-} from "@modelcontextprotocol/sdk/types.js";
 import { BridgeClient } from "./bridge";
 import { cachePath, readCache, writeCache } from "./cache";
 import { getAppConfig, isAppId } from "./config";
 import { installPiConfig } from "./install";
+import { startHttpServer } from "./http";
+import { readHttpToken } from "./http-auth";
 import { desktopPath, hasManagedLauncher, installDesktopLauncher, installedDesktopEntry } from "./desktop";
 import { appStatus, startAndWait } from "./launcher";
 import { APP_IDS, type AppId } from "./types";
@@ -21,7 +14,8 @@ function usage(): string {
   return `${program} — lazy launcher for ArtCraft MCP bridges
 
 Usage:
-  ${program} <app>
+  ${program} serve
+  ${program} auth-header
   ${program} refresh [--install-launchers] <app>|--all
   ${program} install-desktop [<app>|--all]
   ${program} cache-status <app>
@@ -93,37 +87,28 @@ async function refresh(appId: AppId): Promise<void> {
   }
 }
 
-async function serve(appId: AppId): Promise<void> {
-  const cache = await readCache(appId);
-  const bridge = new BridgeClient(getAppConfig(appId));
-  const server = new McpServer(
-    { name: `${program}-${appId}`, version: "0.1.0" },
-    { capabilities: { tools: {} } },
-  );
-
-  server.server.setRequestHandler(ListToolsRequestSchema, async () => {
-    if (!cache) {
-      throw new McpError(
-        ErrorCode.InvalidRequest,
-        `No cached tools for ${appId}; run '${program} refresh ${appId}' before configuring this MCP server.`,
-      );
-    }
-    return { tools: cache.tools };
-  });
-  server.server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
-    const result = await bridge.callTool(request.params);
-    return result as CallToolResult;
-  });
-
-  await server.connect(new StdioServerTransport());
+async function serve(): Promise<void> {
+  const server = startHttpServer(await readHttpToken());
+  console.log(`${program}: listening on 127.0.0.1:${server.port}`);
+  let closing = false;
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      if (closing) return;
+      closing = true;
+      void server.close().then(() => process.exit(0), () => process.exit(1));
+    });
+  }
 }
 
 async function main(arguments_: string[]): Promise<void> {
   const [command, argument] = arguments_;
-  if (command === undefined || ["help", "--help", "-h"].includes(command)) return void console.log(usage());
-  if (isAppId(command)) return serve(command);
-
+  if (command === undefined || ["help", "--help", "-h"].includes(command)) {
+    console.log(usage());
+    return;
+  }
   const handlers: Record<string, () => Promise<void>> = {
+    serve,
+    "auth-header": async () => console.log(`Bearer ${await readHttpToken()}`),
     refresh: async () => {
       const installLaunchers = arguments_.includes("--install-launchers");
       const target = arguments_.find((value) => value !== "refresh" && value !== "--install-launchers");

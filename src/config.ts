@@ -15,6 +15,7 @@ export interface AppConfig {
   controlTokenFile?: string;
   newInstance?: boolean;
   shareNetwork?: boolean;
+  controlHealth?: "ui-inspect" | "tcp";
 }
 
 function flatpakCommand(app: string, executable: string, args: string[]): CommandSpec {
@@ -31,6 +32,7 @@ function appConfig(
   controlTokenFile?: string,
   newInstance = false,
   shareNetwork = false,
+  controlHealth: AppConfig["controlHealth"] = "ui-inspect",
 ): AppConfig {
   const flatpakApp = `ai.storyteller.${id}`;
   return {
@@ -49,6 +51,7 @@ function appConfig(
     controlTokenFile,
     newInstance,
     shareNetwork,
+    controlHealth,
   };
 }
 
@@ -63,7 +66,7 @@ const configs: Record<AppId, AppConfig> = {
     true,
     true,
   ),
-  deckcraft: appConfig("deckcraft", 7982, ["mcp", "--connect", "127.0.0.1:7982"], undefined, false, true),
+  deckcraft: appConfig("deckcraft", 7982, ["mcp", "--connect", "127.0.0.1:7982"], undefined, false, true, "tcp"),
 };
 
 export function isAppId(value: string): value is AppId {

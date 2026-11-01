@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readWordcraftControlKey } from "../src/credentials";
+import { readGridcraftControlToken, readWordcraftControlKey } from "../src/credentials";
 
 const directories: string[] = [];
 
@@ -15,6 +15,32 @@ async function directory(): Promise<string> {
   directories.push(path);
   return path;
 }
+
+describe("GridCraft control token", () => {
+  test("reads the Flatpak runtime token and honors the explicit environment token", async () => {
+    const runtime = await directory();
+    const tokenDir = join(runtime, ".flatpak", "ai.storyteller.gridcraft", "xdg-run", "gridcraft");
+    await mkdir(tokenDir, { recursive: true });
+    const previousRuntime = process.env.XDG_RUNTIME_DIR;
+    const previousToken = process.env.GRIDCRAFT_CONTROL_TOKEN;
+    try {
+      process.env.XDG_RUNTIME_DIR = runtime;
+      delete process.env.GRIDCRAFT_CONTROL_TOKEN;
+      expect(await readGridcraftControlToken(7979)).toBeUndefined();
+      await writeFile(join(tokenDir, "control-7979.token"), "first-secret\n", { mode: 0o600 });
+      expect(await readGridcraftControlToken(7979)).toBe("first-secret");
+      await writeFile(join(tokenDir, "control-7979.token"), "rotated-secret\n");
+      expect(await readGridcraftControlToken(7979)).toBe("rotated-secret");
+      process.env.GRIDCRAFT_CONTROL_TOKEN = "explicit-secret";
+      expect(await readGridcraftControlToken(7979)).toBe("explicit-secret");
+    } finally {
+      if (previousRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = previousRuntime;
+      if (previousToken === undefined) delete process.env.GRIDCRAFT_CONTROL_TOKEN;
+      else process.env.GRIDCRAFT_CONTROL_TOKEN = previousToken;
+    }
+  });
+});
 
 describe("WordCraft control key", () => {
   test("reads the newest generated key without exposing its filename", async () => {

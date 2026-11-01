@@ -2,15 +2,15 @@
 
 ## Objective
 
-Create a Bun binary named `mcp-trigger`. It must act as a stdio MCP server for one ArtCraft application identified by its positional argument. It must respond to discovery from a local cache and create the real MCP bridge only when a tool is executed.
+Create a Bun binary named `mcp-trigger`. It serves one Streamable HTTP MCP endpoint per ArtCraft application from a single host-side user service. It responds to discovery from a local cache and creates the real MCP bridge only when a tool is executed.
 
 The initial scope covers PhotoCraft, WordCraft, DeckCraft, and GridCraft installed locally through Flatpak. Applications are never closed automatically.
 
 ## Final decisions
 
-- One binary and four entries in `~/.pi/agent/mcp.json`.
-- One `mcp-trigger <app>` process represents exactly one ArtCraft bridge.
-- Tool names remain unprefixed because bridges do not share a server and therefore cannot collide.
+- One binary, one systemd user service, and four HTTP entries in `~/.pi/agent/mcp.json`.
+- One endpoint and shared lazy bridge represent each ArtCraft application.
+- Tool names remain unprefixed because application endpoints are separate.
 - `tools/list` uses only the local cache and never opens an application.
 - The cache is updated through `mcp-trigger refresh <app>` or `refresh --all`.
 - An initial call waits for the application to become ready up to a configured timeout.
@@ -25,7 +25,7 @@ Verify these points before finalizing each adapter's code:
 
 1. Flatpak desktop invocation accepts `--control PORT` for all four applications.
 2. The control protocol supports a health check that does not change state.
-3. GridCraft and DeckCraft do not require a token; WordCraft and PhotoCraft do.
+3. GridCraft, WordCraft, and PhotoCraft require credentials in the versions tested; DeckCraft does not.
 4. Real bridges publish their complete tools and schemas through `tools/list` after `initialize`.
 5. The TypeScript MCP SDK works inside a binary compiled with the installed Bun version.
 
@@ -75,9 +75,11 @@ Initial ports:
 | PhotoCraft | 7981 |
 | DeckCraft | 7982 |
 
-The launcher must verify that an unrelated process is not occupying the port before starting the application. After startup, the health check must validate that the expected control protocol responds, rather than merely opening a TCP socket.
+The launcher checks the control protocol where supported. DeckCraft uses TCP availability because its `ui.inspect` check was unreliable; this cannot distinguish an unrelated service.
 
 ## Phases
+
+Phases 1–8 describe the original stdio implementation and its historical verification. The HTTP migration supersedes its Pi-facing transport.
 
 ### 1. Project foundation — completed
 
@@ -95,17 +97,17 @@ PhotoCraft token-file and WordCraft control-key handling were subsequently added
 
 ### 3. Minimal control client — implemented with partial validation
 
-The installed documentation and CLIs confirmed that control channels use JSON-lines over loopback. The client sends `ui.inspect`, which does not modify documents, and requires a response with the same ID and valid JSON shape (`ok` plus exactly one of `result` or `error`).
+The installed documentation and CLIs confirmed that control channels use JSON-lines over loopback. GridCraft, WordCraft, and PhotoCraft use `ui.inspect`, which does not modify documents, and require a response with the same ID and valid JSON shape (`ok` plus exactly one of `result` or `error`).
 
-The implementation does not rely on a stable application identity response. Therefore, `occupied` means that a port did not pass the expected protocol validation; no MCP call is forwarded to it.
+DeckCraft 0.11.1 sometimes stopped responding to `ui.inspect` while its MCP bridge continued to work. DeckCraft therefore uses a TCP availability check, which does not identify the service. GridCraft 0.14.2 requires authentication before `ui.inspect`; the trigger reads its Flatpak runtime token and passes the runtime directory to its bridge. For the other applications, `occupied` means that a port did not pass the configured protocol check.
 
-**Verification performed:** when applications are stopped, the result is `stopped`; an unrelated fake TCP server returns `occupied`; all four real ArtCraft applications return `ready` when correctly launched.
+**Verification performed:** when applications are stopped, the result is `stopped`; an unrelated fake TCP server returns `occupied` for protocol-validated applications; all four real ArtCraft applications return `ready` when correctly launched. The DeckCraft regression was reproduced and verified with TCP availability plus a successful proxied `inspect_document` call.
 
 ### 4. Discovery cache — implemented with partial validation
 
 `refresh <app>` and `refresh --all` use the MCP SDK client to start the real bridge, complete `initialize`, request `tools/list`, and save a validated cache through atomic replacement. A corrupt cache is treated as missing.
 
-**Verification performed:** `refresh` was tested against all four real applications. GridCraft discovered 21 tools; WordCraft, 16; PhotoCraft, 25; and DeckCraft, 25. WordCraft requires its temporary key and PhotoCraft requires a private token file. PhotoCraft and DeckCraft run with `--share=network` because their Flatpak permissions do not expose host loopback by default.
+**Verification performed:** `refresh` was tested against all four real applications. GridCraft 0.14.2 discovered 22 tools; WordCraft discovered 16, PhotoCraft 25, and DeckCraft 25 in earlier tests. GridCraft and WordCraft use generated credentials; PhotoCraft uses a private token file. PhotoCraft and DeckCraft run with `--share=network` because their Flatpak permissions do not expose host loopback by default.
 
 ### 5. Lazy MCP proxy — MVP implemented
 
@@ -142,6 +144,18 @@ The compiled binary does not depend on the repository working directory.
 
 **Verification performed:** `scripts/install.sh` passes ShellCheck. An installation in a temporary `$HOME` created the binary, all four launchers, and all four MCP entries without modifying the real configuration. The real installation then updated `~/.pi/agent/mcp.json` and replaced direct ArtCraft configuration.
 
+### 9. Host-side HTTP and systemd migration
+
+The host service listens on loopback and exposes four authenticated Streamable HTTP endpoints. Pi obtains a private bearer token through `auth-header`; `install-pi` creates the token and replaces the four stdio entries. Each HTTP request uses a fresh stateless MCP transport, while connections to the ArtCraft bridges are shared per application. The user unit uses `KillMode=process` so stopping it does not deliberately terminate application windows.
+
+The sandbox can invoke ArtCraft with host-side application permissions. Different `/tmp` mounts are not shared. HTTP clients must not retry non-idempotent calls after an ambiguous failure. The HTTP server does not relay server-initiated notifications or cross-request cancellation.
+
+**Verification performed:** type-check, 19 tests, build, ShellCheck, and systemd unit verification pass. Normal Pi and the actual `pi-safe mcp list` discover all four endpoints; discovery leaves stopped PhotoCraft and WordCraft closed. Pi's MCP runtime successfully calls GridCraft `inspect_workbook` and DeckCraft `inspect_document` from the host and under the same sandbox bindings; both documents report `dirty: false`. Two concurrent Pi runtime clients successfully inspect GridCraft. An existing SDK client succeeds again after a service restart.
+
+With PhotoCraft and WordCraft stopped, concurrent read-only calls from Pi started both applications through the HTTP service and returned their command lists. Pi's MCP runtime also retrieved those lists on the host and under the `pi-safe` sandbox bindings.
+
+A subsequent test from an actual `pi-safe` session found that closing PhotoCraft left its bridge alive; the next call failed because the proxy reused it. The proxy now checks application readiness before each call and discards a stale bridge. A simulated regression test covers restart, concurrent calls, and the absence of automatic retries. After installing the fix, Pi's MCP runtime successfully restarted PhotoCraft under equivalent sandbox bindings. A second call succeeded after PhotoCraft was manually closed while its bridge remained alive; the service replaced the bridge without restarting.
+
 ## Priority test cases
 
 | Case | Expected result |
@@ -164,8 +178,8 @@ Unit tests cover configuration parsing, cache validation and atomic writes, `mcp
 - If a user starts an application manually without the reserved port, the trigger cannot reuse that instance. It opens, or asks to open, a controllable instance with the configured port.
 - ArtCraft updates may change schemas or their protocol. Run `refresh` after updating applications.
 - TCP control tokens grant local automation access. Use loopback listeners and private user files only.
-- The first version does not implement automatic shutdown, multiplexing between trigger processes, or remote connections.
+- The HTTP service does not close applications, expose non-loopback listeners, or provide multi-document routing.
 
-## First-version completion criterion
+## Current completion criterion
 
-The first version is complete when Pi, with the four `mcp.json` entries, can load them with ArtCraft applications closed; `tools/list` works from cache; and one real tool call per application starts only its application, executes the call, and leaves the application open.
+Pi can discover the four HTTP endpoints from the host and `pi-safe`, and can execute read-only tools through the host service. Discovery does not open applications, and the service never intentionally closes them. Closed-state lazy startup and stale-bridge recovery have been verified for PhotoCraft using Pi's MCP runtime under equivalent sandbox bindings.

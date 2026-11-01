@@ -1,10 +1,10 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { AppConfig } from "./config";
 import { join } from "node:path";
-import { readWordcraftControlKey } from "./credentials";
-import { startAndWait } from "./launcher";
+import { readWordcraftControlKey, runtimeDirectory } from "./credentials";
+import { appStatus, startAndWait } from "./launcher";
 import type { ToolDefinition } from "./types";
 
 export class BridgeClient {
@@ -33,13 +33,24 @@ export class BridgeClient {
   }
 
   private async connect(): Promise<Client> {
-    if (this.client) return this.client;
-    if (!this.connecting) this.connecting = this.createClient();
+    const connecting = this.connecting ??= this.ensureClient();
     try {
-      return await this.connecting;
+      return await connecting;
     } finally {
-      this.connecting = undefined;
+      if (this.connecting === connecting) this.connecting = undefined;
     }
+  }
+
+  private async ensureClient(): Promise<Client> {
+    if (this.client) {
+      const status = await appStatus(this.config);
+      if (status === "ready" && this.client) return this.client;
+      const transport = this.transport;
+      this.client = undefined;
+      this.transport = undefined;
+      if (transport) await transport.close();
+    }
+    return this.createClient();
   }
 
   private async createClient(): Promise<Client> {
@@ -47,6 +58,7 @@ export class BridgeClient {
     const transport = new StdioClientTransport({
       command: this.config.bridge.command,
       args: await this.bridgeArgs(),
+      ...(this.config.id === "gridcraft" ? { env: this.gridcraftEnvironment() } : {}),
       stderr: "ignore",
     });
     const client = new Client(
@@ -56,7 +68,6 @@ export class BridgeClient {
     transport.onclose = () => {
       if (this.transport === transport) {
         this.client = undefined;
-        this.connecting = undefined;
         this.transport = undefined;
       }
     };
@@ -71,6 +82,14 @@ export class BridgeClient {
     this.client = client;
     this.transport = transport;
     return client;
+  }
+
+  private gridcraftEnvironment(): Record<string, string> {
+    const env = getDefaultEnvironment();
+    const runtime = runtimeDirectory();
+    if (runtime) env.XDG_RUNTIME_DIR = runtime;
+    if (process.env.GRIDCRAFT_CONTROL_TOKEN) env.GRIDCRAFT_CONTROL_TOKEN = process.env.GRIDCRAFT_CONTROL_TOKEN;
+    return env;
   }
 
   private async bridgeArgs(): Promise<string[]> {

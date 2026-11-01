@@ -1,15 +1,15 @@
 # mcp-trigger
 
-`mcp-trigger` is a stdio MCP server that exposes cached tools from an ArtCraft MCP bridge and opens the desktop application only when a tool is invoked.
+`mcp-trigger` is a local Streamable HTTP MCP server that exposes cached tools from ArtCraft MCP bridges. It opens a desktop application only when a tool is invoked.
 
-It is installed as a single binary. Pi registers it four times, once per application, with a distinct identifier:
+A single user service provides four endpoints. Pi registers each endpoint with a distinct identifier:
 
 - `photocraft`
 - `wordcraft`
 - `deckcraft`
 - `gridcraft`
 
-Each process serves only its application. Tools retain their original names and are never mixed across servers.
+Each endpoint serves only its application. Tools retain their original names and are never mixed across endpoints.
 
 ## Problem solved
 
@@ -24,10 +24,10 @@ ArtCraft MCP bridges operate in bridge mode against a TCP port exposed by a desk
 ## Architecture
 
 ```text
-MCP client / Pi
-       │ stdio
+MCP client / Pi, including pi-safe
+       │ Streamable HTTP over loopback
        ▼
-mcp-trigger <app>
+mcp-trigger user service (one endpoint per app)
        │  tools/list: local cache
        │  tools/call: lazy start + MCP proxy
        ▼
@@ -37,7 +37,7 @@ real MCP bridge (stdio subprocess)
 ArtCraft desktop application
 ```
 
-The trigger keeps the real bridge while the application responds. If the user closes the application, a later call detects the failure, discards the bridge, and starts the cycle again.
+The service shares one bridge connection per application across HTTP clients. When a bridge exits, a later call creates a new one. A call that fails is not retried by the proxy; its effects may already have occurred.
 
 ## Applications and ports
 
@@ -50,7 +50,7 @@ Fixed loopback ports ensure that the launcher, bridge, and health check share pr
 | `photocraft` | `ai.storyteller.photocraft` | 7981 | `flatpak run --share=network --command=photocraft-cli ai.storyteller.photocraft mcp --bridge 127.0.0.1:7981 …` |
 | `deckcraft` | `ai.storyteller.deckcraft` | 7982 | `flatpak run --share=network --command=deckcraft-cli ai.storyteller.deckcraft mcp --connect 127.0.0.1:7982` |
 
-All four ports were free when this document was written. The launcher must fail with an explicit error if another process uses a reserved port; it must not connect to an unknown service.
+The launcher rejects ports that fail the configured health check. DeckCraft's TCP-only check cannot distinguish DeckCraft from an unrelated service.
 
 The expected launch commands are:
 
@@ -61,7 +61,7 @@ flatpak run --share=network ai.storyteller.photocraft --new-instance --control 7
 flatpak run --share=network ai.storyteller.deckcraft --control 7982
 ```
 
-WordCraft uses its existing control key. PhotoCraft must use a private token file so that the launcher and bridge share the same credential. The CLIs are contained in the Flatpaks, so the trigger runs them with `flatpak run --command=<app>-cli`, rather than as host binaries.
+GridCraft creates a control token in its Flatpak runtime directory; the trigger and bridge use it for authentication. WordCraft uses its existing control key. PhotoCraft must use a private token file so that the launcher and bridge share the same credential. The CLIs are contained in the Flatpaks, so the trigger runs them with `flatpak run --command=<app>-cli`, rather than as host binaries.
 
 ## Verified application-specific requirements
 
@@ -69,10 +69,10 @@ These conditions were verified against the Flatpak versions installed during imp
 
 | Application | Required setting | Reason and verification |
 | --- | --- | --- |
-| GridCraft | `--control 7979` | `gridcraft-cli mcp --connect 127.0.0.1:7979` responded to `tools/list` and to a real call. It required neither a credential nor additional network sharing. |
+| GridCraft | `--control 7979` | GridCraft 0.14.2 requires a control token. The trigger reads the Flatpak runtime token for its health check and passes `XDG_RUNTIME_DIR` to the bridge. It also supports `GRIDCRAFT_CONTROL_TOKEN` when explicitly configured. |
 | WordCraft | `--control 7980` and `WORDCRAFT_CONTROL_KEY` | When started with control enabled, WordCraft creates `control-key.*` in its configuration directory. The trigger selects the newest key without logging it and passes it only to the Flatpak bridge. |
 | PhotoCraft | `--share=network`, `--new-instance`, `--control 7981`, and `--control-token-file` | The sandbox does not share networking by default, so its loopback was inaccessible from the host. `--new-instance` prevents launch delegation to an instance without control enabled. The token file lets the application and bridge authenticate the channel. |
-| DeckCraft | `--share=network` and `--control 7982` | Its sandbox also does not share networking by default. Both the launcher and `deckcraft-cli` need `--share=network` to use the host loopback. |
+| DeckCraft | `--share=network` and `--control 7982` | Its sandbox also does not share networking by default. Both the launcher and `deckcraft-cli` need `--share=network` to use the host loopback. Its health check verifies TCP availability, but does not identify the listening service. |
 
 The overrides created by `install-desktop` apply these settings. If a future version changes arguments, authentication, or Flatpak permissions, run `install-desktop --all`, run `refresh --all`, and review this table.
 
@@ -119,38 +119,36 @@ bun run install-local
 ./scripts/install.sh --refresh
 ```
 
-The script compiles the binary, copies it to `~/.local/bin/mcp-trigger`, installs launchers, updates the desktop launcher database when `update-desktop-database` is available, and updates `~/.pi/agent/mcp.json` idempotently. `--refresh` opens applications when needed and leaves their windows open.
+The script compiles and atomically installs the binary, installs launchers, updates the desktop launcher database when available, and updates `~/.pi/agent/mcp.json`. It installs and enables `~/.config/systemd/user/mcp-trigger.service`, then starts or restarts it. `--refresh` opens applications when needed and leaves their windows open. A running systemd user manager is required. Reload Pi sessions after updating their MCP configuration.
 
 After installation and cache generation, Pi has a configuration equivalent to:
 
 ```json
 {
   "mcpServers": {
-    "photocraft": { "command": "mcp-trigger", "args": ["photocraft"] },
-    "deckcraft": { "command": "mcp-trigger", "args": ["deckcraft"] },
-    "gridcraft": { "command": "mcp-trigger", "args": ["gridcraft"] },
-    "wordcraft": { "command": "mcp-trigger", "args": ["wordcraft"] }
+    "photocraft": { "url": "http://127.0.0.1:19797/mcp/photocraft", "headers": { "Authorization": "!~/.local/bin/mcp-trigger auth-header" } },
+    "deckcraft": { "url": "http://127.0.0.1:19797/mcp/deckcraft", "headers": { "Authorization": "!~/.local/bin/mcp-trigger auth-header" } },
+    "gridcraft": { "url": "http://127.0.0.1:19797/mcp/gridcraft", "headers": { "Authorization": "!~/.local/bin/mcp-trigger auth-header" } },
+    "wordcraft": { "url": "http://127.0.0.1:19797/mcp/wordcraft", "headers": { "Authorization": "!~/.local/bin/mcp-trigger auth-header" } }
   }
 }
 ```
 
-The installer preserves unrelated MCP entries and replaces the four existing direct ArtCraft entries.
+The installer preserves unrelated MCP entries and replaces the four existing ArtCraft entries. `install-pi` creates a private HTTP token if needed and does not replace an existing token. Pi obtains its authorization header by executing the command shown above; the token is not embedded in `mcp.json`.
+
+Check the service with `systemctl --user status mcp-trigger.service` and inspect its log with `journalctl --user -u mcp-trigger.service`. The service inherits the user manager's graphical session environment; if it cannot open windows, check that the manager has the correct `DISPLAY`, `WAYLAND_DISPLAY`, and session bus environment. Stopping the service does not intentionally close application windows. `KillMode=process` prevents systemd from killing applications launched in the service's cgroup; an abrupt service crash can leave a bridge subprocess behind.
 
 ## Tool-call behavior
 
-For each tool call:
+Before forwarding a tool call, the service checks the control port. If the application has stopped, it discards any old bridge, starts the application, waits for readiness, and initializes a new bridge. Concurrent connection attempts share this work. An application can still stop between the check and the call; the proxy reports that failure without retrying.
 
-1. The trigger performs an authenticated or unauthenticated health check, depending on the application.
-2. If the application is unavailable, it launches it only once even when calls arrive concurrently.
-3. It waits for the control port to respond, up to the configured timeout.
-4. It starts and initializes the real MCP bridge as a stdio subprocess.
-5. It forwards the original request and relays its MCP response.
-
-A timeout does not automatically retry a tool. An operation may have reached the application before the connection failed, so retrying must remain the client's decision.
+The proxy does not automatically retry a tool. An operation may have reached the application before a connection failed, so clients must avoid retrying non-idempotent calls without checking their effects. HTTP is stateless: the server does not provide server-initiated notifications or cancellation across requests.
 
 ## Security
 
-Control ports bind to `127.0.0.1`. WordCraft and PhotoCraft secrets are never written to the cache or logged. Token files must be readable only by the current user.
+The HTTP service binds only to `127.0.0.1:19797`, validates the Host and Origin headers, and requires a bearer token. The token is stored in `${XDG_CONFIG_HOME:-~/.config}/mcp-trigger/http-token` with private permissions. The service and Pi must use the same `HOME` and `XDG_CONFIG_HOME`. The token and ArtCraft credentials are not written to the tool cache or logged by the proxy. GridCraft authentication does not independently identify the server: another local service could imitate its authentication challenge.
+
+An authorized sandboxed Pi session can invoke ArtCraft outside the sandbox. Those applications can read and modify files available to them, not just the sandbox's writable paths. The sandbox and host use different `/tmp` directories; use a shared path when exchanging files. Loopback authentication is not a security boundary against another process with access to the same user's token.
 
 The trigger does not close applications, send `app.quit`, or attempt document recovery after the user closes a window.
 
